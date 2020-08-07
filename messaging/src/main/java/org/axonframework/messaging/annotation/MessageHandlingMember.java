@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010-2018. Axon Framework
+ * Copyright (c) 2010-2020. Axon Framework
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,6 +19,8 @@ package org.axonframework.messaging.annotation;
 import org.axonframework.messaging.Message;
 
 import java.lang.annotation.Annotation;
+import java.lang.reflect.Executable;
+import java.lang.reflect.Member;
 import java.util.Map;
 import java.util.Optional;
 
@@ -49,7 +51,9 @@ public interface MessageHandlingMember<T> {
      *
      * @return Number indicating the priority of this handler over other handlers
      */
-    int priority();
+    default int priority() {
+        return 0;
+    }
 
     /**
      * Checks if this handler is capable of handling the given {@code message}.
@@ -95,9 +99,34 @@ public interface MessageHandlingMember<T> {
     <HT> Optional<HT> unwrap(Class<HT> handlerType);
 
     /**
+     * Gets the declaring class of this Message Handling Member.
+     *
+     * @return the declaring class of this Message Handling Member
+     */
+    default Class<?> declaringClass() {
+        return unwrap(Member.class).map(Member::getDeclaringClass)
+                                   .orElseThrow(() -> new UnsupportedOperationException(
+                                           "This implementation of MessageHandlingMember does not wrap a "
+                                                   + "java.lang.reflect.Member. Please provide a different way of "
+                                                   + "getting 'declaringClass' of this MessageHandlingMember."));
+    }
+
+    /**
+     * Returns the signature of the member. This may be used in logging or exceptions to demarcate the actual class
+     * member invoked. If this member does not have a signature, {@code "__unknown__"} is returned.
+     *
+     * @return the signature of the handling member
+     */
+    default String signature() {
+        return unwrap(Executable.class).map(Executable::toGenericString)
+                                       .orElse("__unknown__");
+    }
+
+    /**
      * Checks whether the method of the target entity contains the given {@code annotationType}.
      *
      * @param annotationType Annotation to check for on the target method
+     *
      * @return {@code true} if the annotation is present on the target method, {@code false} otherwise
      */
     boolean hasAnnotation(Class<? extends Annotation> annotationType);

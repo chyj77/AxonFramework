@@ -118,9 +118,10 @@ public class AggregateTestFixture<T> implements FixtureConfiguration<T>, TestExe
     private static final Logger logger = LoggerFactory.getLogger(AggregateTestFixture.class);
 
     private final Class<T> aggregateType;
+    private final Set<Class<? extends T>> subtypes = new HashSet<>();
     private final SimpleCommandBus commandBus;
-    private final List<MessageDispatchInterceptor<CommandMessage<?>>> commandDispatchInterceptors = new ArrayList<>();
-    private final List<MessageHandlerInterceptor<CommandMessage<?>>> commandHandlerInterceptors = new ArrayList<>();
+    private final List<MessageDispatchInterceptor<? super CommandMessage<?>>> commandDispatchInterceptors = new ArrayList<>();
+    private final List<MessageHandlerInterceptor<? super CommandMessage<?>>> commandHandlerInterceptors = new ArrayList<>();
     private final EventStore eventStore;
     private final List<FieldFilter> fieldFilters = new ArrayList<>();
     private final List<Object> resources = new ArrayList<>();
@@ -158,6 +159,13 @@ public class AggregateTestFixture<T> implements FixtureConfiguration<T>, TestExe
         registeredParameterResolverFactories.add(ClasspathParameterResolverFactory.forClass(aggregateType));
         registeredHandlerDefinitions.add(ClasspathHandlerDefinition.forClass(aggregateType));
         registeredHandlerEnhancerDefinitions.add(ClasspathHandlerEnhancerDefinition.forClass(aggregateType));
+    }
+
+    @SafeVarargs
+    @Override
+    public final FixtureConfiguration<T> withSubtypes(Class<? extends T>... subtypes) {
+        this.subtypes.addAll(Arrays.asList(subtypes));
+        return this;
     }
 
     @Override
@@ -230,28 +238,28 @@ public class AggregateTestFixture<T> implements FixtureConfiguration<T>, TestExe
 
     @Override
     public FixtureConfiguration<T> registerCommandDispatchInterceptor(
-            MessageDispatchInterceptor<CommandMessage<?>> commandDispatchInterceptor) {
+            MessageDispatchInterceptor<? super CommandMessage<?>> commandDispatchInterceptor) {
         this.commandDispatchInterceptors.add(commandDispatchInterceptor);
         return this;
     }
 
     @Override
     public FixtureConfiguration<T> registerCommandHandlerInterceptor(
-            MessageHandlerInterceptor<CommandMessage<?>> commandHandlerInterceptor) {
+            MessageHandlerInterceptor<? super CommandMessage<?>> commandHandlerInterceptor) {
         this.commandHandlerInterceptors.add(commandHandlerInterceptor);
         return this;
     }
 
     @Override
     public FixtureConfiguration<T> registerDeadlineDispatchInterceptor(
-            MessageDispatchInterceptor<DeadlineMessage<?>> deadlineDispatchInterceptor) {
+            MessageDispatchInterceptor<? super DeadlineMessage<?>> deadlineDispatchInterceptor) {
         this.deadlineManager.registerDispatchInterceptor(deadlineDispatchInterceptor);
         return this;
     }
 
     @Override
     public FixtureConfiguration<T> registerDeadlineHandlerInterceptor(
-            MessageHandlerInterceptor<DeadlineMessage<?>> deadlineHandlerInterceptor) {
+            MessageHandlerInterceptor<? super DeadlineMessage<?>> deadlineHandlerInterceptor) {
         this.deadlineManager.registerHandlerInterceptor(deadlineHandlerInterceptor);
         return this;
     }
@@ -307,6 +315,7 @@ public class AggregateTestFixture<T> implements FixtureConfiguration<T>, TestExe
         DefaultUnitOfWork.startAndGet(null).execute(() -> {
             if (repository == null) {
                 registerRepository(new InMemoryRepository<>(aggregateType,
+                                                            subtypes,
                                                             eventStore,
                                                             getParameterResolverFactory(),
                                                             getHandlerDefinition(),
@@ -335,12 +344,16 @@ public class AggregateTestFixture<T> implements FixtureConfiguration<T>, TestExe
         for (Object event : domainEvents) {
             Object payload = event;
             MetaData metaData = null;
+            String type = aggregateType.getSimpleName();
             if (event instanceof Message) {
                 payload = ((Message<?>) event).getPayload();
                 metaData = ((Message<?>) event).getMetaData();
             }
+            if (event instanceof DomainEventMessage) {
+                type = ((DomainEventMessage<?>) event).getType();
+            }
             GenericDomainEventMessage<Object> eventMessage = new GenericDomainEventMessage<>(
-                    aggregateType.getSimpleName(),
+                    type,
                     aggregateIdentifier,
                     sequenceNumber++,
                     new GenericMessage<>(payload, metaData),
@@ -480,6 +493,7 @@ public class AggregateTestFixture<T> implements FixtureConfiguration<T>, TestExe
         if (!explicitCommandHandlersSet) {
             AggregateAnnotationCommandHandler.Builder<T> builder = AggregateAnnotationCommandHandler.<T>builder()
                     .aggregateType(aggregateType)
+                    .aggregateModel(aggregateModel())
                     .parameterResolverFactory(getParameterResolverFactory())
                     .repository(this.repository);
 
@@ -494,14 +508,23 @@ public class AggregateTestFixture<T> implements FixtureConfiguration<T>, TestExe
 
     private void ensureRepositoryConfiguration() {
         if (repository == null) {
+            AggregateModel<T> aggregateModel = aggregateModel();
             registerRepository(EventSourcingRepository.builder(aggregateType)
-                                                      .aggregateFactory(new GenericAggregateFactory<>(aggregateType))
+                                                      .aggregateModel(aggregateModel)
+                                                      .aggregateFactory(new GenericAggregateFactory<>(aggregateModel))
                                                       .eventStore(eventStore)
                                                       .parameterResolverFactory(getParameterResolverFactory())
                                                       .handlerDefinition(getHandlerDefinition())
                                                       .repositoryProvider(getRepositoryProvider())
                                                       .build());
         }
+    }
+
+    private AggregateModel<T> aggregateModel() {
+        return AnnotatedAggregateMetaModelFactory.inspectAggregate(aggregateType,
+                                                                   getParameterResolverFactory(),
+                                                                   getHandlerDefinition(),
+                                                                   subtypes);
     }
 
     private ParameterResolverFactory getParameterResolverFactory() {
@@ -670,6 +693,13 @@ public class AggregateTestFixture<T> implements FixtureConfiguration<T>, TestExe
         }
 
         @Override
+        public Aggregate<T> loadOrCreate(String aggregateIdentifier, Callable<T> factoryMethod) throws Exception {
+            CurrentUnitOfWork.get().onRollback(u -> this.rolledBack = true);
+            aggregate = delegate.loadOrCreate(aggregateIdentifier, factoryMethod);
+            return aggregate;
+        }
+
+        @Override
         public Aggregate<T> newInstance(Callable<T> factoryMethod) throws Exception {
             CurrentUnitOfWork.get().onRollback(u -> this.rolledBack = true);
             aggregate = delegate.newInstance(factoryMethod);
@@ -730,12 +760,13 @@ public class AggregateTestFixture<T> implements FixtureConfiguration<T>, TestExe
         private AnnotatedAggregate<T> storedAggregate;
 
         protected InMemoryRepository(Class<T> aggregateType,
+                                     Set<Class<? extends T>> subtypes,
                                      EventBus eventBus,
                                      ParameterResolverFactory parameterResolverFactory,
                                      HandlerDefinition handlerDefinition,
                                      RepositoryProvider repositoryProvider) {
             this.aggregateModel = AnnotatedAggregateMetaModelFactory.inspectAggregate(
-                    aggregateType, parameterResolverFactory, handlerDefinition
+                    aggregateType, parameterResolverFactory, handlerDefinition, subtypes
             );
             this.eventBus = eventBus;
             this.repositoryProvider = repositoryProvider;
@@ -792,6 +823,15 @@ public class AggregateTestFixture<T> implements FixtureConfiguration<T>, TestExe
         public boolean canResolve(ScopeDescriptor scopeDescription) {
             return scopeDescription instanceof AggregateScopeDescriptor;
         }
+
+        @Override
+        public Aggregate<T> loadOrCreate(String aggregateIdentifier, Callable<T> factoryMethod) throws Exception {
+            if (storedAggregate == null) {
+                return newInstance(factoryMethod);
+            }
+
+            return load(aggregateIdentifier);
+        }
     }
 
     private class RecordingEventStore implements EventStore {
@@ -799,8 +839,13 @@ public class AggregateTestFixture<T> implements FixtureConfiguration<T>, TestExe
         @Override
         public DomainEventStream readEvents(String identifier) {
             if (aggregateIdentifier != null && !aggregateIdentifier.equals(identifier)) {
-                throw new EventStoreException("You probably want to use aggregateIdentifier() on your fixture " +
-                                                      "to get the aggregate identifier to use");
+                String exceptionMessage = format(
+                        "The aggregate identifier used in the 'when' step does not resemble the aggregate identifier"
+                                + " used in the 'given' step. "
+                                + "Please make sure the when-identifier [%s] resembles the given-identifier [%s].",
+                        identifier, aggregateIdentifier
+                );
+                throw new EventStoreException(exceptionMessage);
             } else if (aggregateIdentifier == null) {
                 aggregateIdentifier = identifier;
                 injectAggregateIdentifier();

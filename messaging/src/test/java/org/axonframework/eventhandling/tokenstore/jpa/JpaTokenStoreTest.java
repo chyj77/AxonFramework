@@ -1,11 +1,11 @@
 /*
- * Copyright (c) 2010-2019. Axon Framework
+ * Copyright (c) 2010-2020. Axon Framework
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *    http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -22,7 +22,9 @@ import org.axonframework.common.transaction.Transaction;
 import org.axonframework.common.transaction.TransactionManager;
 import org.axonframework.eventhandling.GlobalSequenceTrackingToken;
 import org.axonframework.eventhandling.TrackingToken;
+import org.axonframework.eventhandling.tokenstore.ConfigToken;
 import org.axonframework.eventhandling.tokenstore.UnableToClaimTokenException;
+import org.axonframework.serialization.TestSerializer;
 import org.axonframework.serialization.xml.XStreamSerializer;
 import org.hibernate.dialect.HSQLDialect;
 import org.hibernate.jpa.HibernatePersistenceProvider;
@@ -55,6 +57,7 @@ import java.time.Duration;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.*;
 
 import static org.hamcrest.CoreMatchers.is;
@@ -107,7 +110,29 @@ public class JpaTokenStoreTest {
                                                .getResultList();
         assertEquals(1, tokens.size());
         assertNotNull(tokens.get(0).getOwner());
-        assertNull(tokens.get(0).getToken(XStreamSerializer.builder().build()));
+        assertNull(tokens.get(0).getToken(TestSerializer.XSTREAM.getSerializer()));
+    }
+
+    @Transactional
+    @Test
+    void testIdentifierInitializedOnDemand() {
+        Optional<String> id1 = jpaTokenStore.retrieveStorageIdentifier();
+        assertTrue(id1.isPresent());
+        Optional<String> id2 = jpaTokenStore.retrieveStorageIdentifier();
+        assertTrue(id2.isPresent());
+        assertEquals(id1.get(), id2.get());
+    }
+    @Transactional
+    @Test
+    void testIdentifierReadIfAvailable() {
+        entityManager.persist(new TokenEntry("__config", 0, new ConfigToken(Collections.singletonMap("id", "test")), jpaTokenStore.serializer() ));
+        Optional<String> id1 = jpaTokenStore.retrieveStorageIdentifier();
+        assertTrue(id1.isPresent());
+        Optional<String> id2 = jpaTokenStore.retrieveStorageIdentifier();
+        assertTrue(id2.isPresent());
+        assertEquals(id1.get(), id2.get());
+
+        assertEquals("test", id1.get());
     }
 
     @Transactional
@@ -386,7 +411,7 @@ public class JpaTokenStoreTest {
             sessionFactory.setPackagesToScan(TokenEntry.class.getPackage().getName());
             sessionFactory.setJpaPropertyMap(Collections.singletonMap("hibernate.dialect", new HSQLDialect()));
             sessionFactory.setJpaPropertyMap(Collections.singletonMap("hibernate.hbm2ddl.auto", "create-drop"));
-            sessionFactory.setJpaPropertyMap(Collections.singletonMap("hibernate.show_sql", "true"));
+            sessionFactory.setJpaPropertyMap(Collections.singletonMap("hibernate.show_sql", "false"));
             sessionFactory.setJpaPropertyMap(Collections.singletonMap("hibernate.connection.url",
                                                                       "jdbc:hsqldb:mem:testdb"));
             return sessionFactory;
@@ -401,7 +426,7 @@ public class JpaTokenStoreTest {
         public JpaTokenStore jpaTokenStore(EntityManagerProvider entityManagerProvider) {
             return JpaTokenStore.builder()
                                 .entityManagerProvider(entityManagerProvider)
-                                .serializer(XStreamSerializer.builder().build())
+                                .serializer(TestSerializer.XSTREAM.getSerializer())
                                 .nodeId("local")
                                 .build();
         }
